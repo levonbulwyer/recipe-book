@@ -120,6 +120,7 @@ function migrate() {
   const have = q("SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
   const missing = need.filter(n => !have.includes(n));
   if (missing.length) throw new Error('This database is missing tables: ' + missing.join(', '));
+  shopMigrate();
 }
 async function fetchPublished() {
   const res = await fetch('recipes.db', { cache: 'no-cache' });
@@ -318,6 +319,7 @@ function recipeView(id) {
   const log = q('SELECT * FROM cook_log WHERE recipe_id=? ORDER BY cooked_on DESC, id DESC', [id]);
   const usedKeys = new Set(steps.flatMap(s => s.uses));
   const unused = lines.filter(l => !usedKeys.has(l.key));
+  const onList = q('SELECT servings FROM shop_recipe WHERE recipe_id=?', [id])[0];
   const method = state.method === 'list'
     ? `<div class="method-list"><div class="card"><h2 style="margin-bottom:6px">Ingredients</h2>${lines.map(l => { const a = amount(l, f); return `<div class="li"><span><span class="q">${esc(a.q)}</span> ${esc(a.u ? (l.estimated ? a.u + ' ≈' : a.u) : '')} ${esc(l.display_name || l.master_name)}${l.note ? `<span class="d">${esc(l.note)}</span>` : ''}${a.rounded ? `<span class="r">${esc(a.rounded)}</span>` : ''}</span></div>`; }).join('')}</div>
        <div class="card"><h2 style="margin-bottom:12px">Method</h2><ol class="steps-ol">${steps.map(s => `<li><div><p>${esc(s.body)}</p>${s.timer_text ? `<span class="chip">${TIMER_SVG}${esc(s.timer_text)}</span>` : ''}</div></li>`).join('')}</ol></div></div>`
@@ -328,7 +330,7 @@ function recipeView(id) {
       ${r.prep_min != null ? `<span><b>Prep</b> ${r.prep_min} min</span>` : ''}${r.cook_min != null ? `<span><b>Cook</b> ${r.cook_min} min</span>` : ''}
       ${r.source ? `<span><b>Source</b> ${esc(r.source)}${r.page ? ', p. ' + esc(r.page) : ''}</span>` : ''}${r.type ? `<span><b>Type</b> ${esc(r.type)}</span>` : ''}${r.cuisine ? `<span><b>Cuisine</b> ${esc(r.cuisine)}</span>` : ''}</div>
       <div style="margin-top:8px">${labels.map(l => `<span class="tag">${esc(l)}</span>`).join('')}</div></div>
-      <div class="row"><a class="btn" href="#cook-${id}">Start cooking</a><a class="btn ghost" href="#edit-${id}">Edit</a></div></div>
+      <div class="row"><a class="btn" href="#cook-${id}">Start cooking</a><button class="btn ghost" id="toshop" type="button">${onList ? 'Update shopping list' : 'Add to shopping list'}</button><a class="btn ghost" href="#edit-${id}">Edit</a></div></div>
     <div class="spread" style="align-items:center">
       <div class="stepper" role="group" aria-label="Servings"><button id="dec" type="button" aria-label="Fewer servings">−</button><output aria-live="polite">${sv} ${sv === 1 ? 'serving' : 'servings'}</output><button id="inc" type="button" aria-label="More servings">+</button></div>
       <div class="seg" role="group" aria-label="Method view"><button type="button" data-m="table" aria-pressed="${state.method === 'table'}">Step table</button><button type="button" data-m="list" aria-pressed="${state.method === 'list'}">List</button></div></div>
@@ -342,6 +344,7 @@ function recipeView(id) {
   document.getElementById('inc').onclick = () => { state.servings[id] = Math.min(60, sv + 1); recipeView(id); };
   $v.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { state.method = b.dataset.m; try { localStorage.setItem('rb-method', state.method); } catch (e) { /* fine */ } recipeView(id); });
   wireLogForm('log', id, () => recipeView(id));
+  document.getElementById('toshop').onclick = async () => { addRecipeToList(id, sv); await persist(); updateShopCount(); toast('On the shopping list for ' + sv + ' servings'); recipeView(id); };
   document.title = r.title + ' · Recipe Book';
 }
 function logForm(p, sv) {
@@ -659,7 +662,7 @@ function ingredientsView() {
         <label class="f">Aisle<select id="e-aisle">${['', ...new Set(AISLES.concat(i.aisle ? [i.aisle] : []))].map(a => `<option ${a === (i.aisle || '') ? 'selected' : ''} value="${esc(a)}">${a || '—'}</option>`).join('')}</select></label>
         <label class="f">Default unit<select id="e-unit"><option value="">—</option>${UNITS.map(u => `<option ${u === i.default_unit ? 'selected' : ''}>${u}</option>`).join('')}</select></label>
         <label class="f">Density (g per mL)<input id="e-dens" type="number" step="0.01" min="0" value="${i.density_g_ml == null ? '' : i.density_g_ml}"></label>
-        <label class="check" style="margin-top:18px"><input type="checkbox" id="e-staple" ${i.is_staple ? 'checked' : ''}> Pantry staple</label></div>
+        <label class="check" style="margin-top:18px"><input type="checkbox" id="e-staple" ${i.is_staple ? 'checked' : ''}> Usually in the pantry</label></div>
       <div class="row"><button class="btn sm" id="e-save" type="button">Save</button><button class="btn sm plain" id="e-cancel" type="button">Cancel</button>
         <span style="flex:1"></span>
         <label class="f" style="width:220px">Merge into<select id="e-merge"><option value="">Choose…</option>${all.filter(o => o.id !== i.id).map(o => `<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select></label>
@@ -667,7 +670,7 @@ function ingredientsView() {
         ${i.uses ? '' : '<button class="btn sm danger" id="e-del" type="button" style="margin-top:18px">Delete</button>'}</div>
       <p class="muted small">Merging moves every recipe that uses ${esc(i.name)} onto the other ingredient, keeps “${esc(i.name)}” as an alias, then removes this entry.</p>
       <span class="err" id="e-msg" role="alert"></span></div></td></tr>`
-    : `<tr><td><b>${esc(i.name)}</b>${i.is_staple ? ' <span class="tag">Staple</span>' : ''}</td><td class="muted">${esc(i.aliases)}</td><td>${esc(i.aisle || '')}</td><td>${esc(i.default_unit || '')}</td><td class="n">${i.density_g_ml == null ? '' : i.density_g_ml}</td><td class="n">${i.uses}</td><td><button class="btn sm plain" data-edit="${i.id}" type="button">Edit</button></td></tr>`;
+    : `<tr><td><b>${esc(i.name)}</b>${i.is_staple ? ' <span class="tag">Pantry</span>' : ''}</td><td class="muted">${esc(i.aliases)}</td><td>${esc(i.aisle || '')}</td><td>${esc(i.default_unit || '')}</td><td class="n">${i.density_g_ml == null ? '' : i.density_g_ml}</td><td class="n">${i.uses}</td><td><button class="btn sm plain" data-edit="${i.id}" type="button">Edit</button></td></tr>`;
   $v.innerHTML = `<div class="stack">
     <div class="spread"><div><h1>Ingredients</h1><div class="meta"><span>The master list every recipe points to. <b>${all.length}</b> ingredients.</span></div></div>
       <input type="search" id="isearch" placeholder="Search name, alias, aisle" aria-label="Search ingredients" value="${esc(state.ingSearch)}" style="max-width:300px"></div>
@@ -705,7 +708,7 @@ function ingredientsView() {
       const target = all.find(x => x.id === into);
       const al = [...new Set(String(target.aliases || '').split(',').map(x => x.trim()).filter(Boolean).concat([i.name], String(i.aliases || '').split(',').map(x => x.trim()).filter(Boolean)))]
         .filter(a => norm(a) !== norm(target.name)).join(',');
-      run('BEGIN'); run('UPDATE recipe_ingredient SET ingredient_id=? WHERE ingredient_id=?', [into, i.id]); run('UPDATE ingredient SET aliases=? WHERE id=?', [al, into]); run('DELETE FROM ingredient WHERE id=?', [i.id]); run('COMMIT');
+      run('BEGIN'); run('UPDATE recipe_ingredient SET ingredient_id=? WHERE ingredient_id=?', [into, i.id]); run('UPDATE shop_item SET ingredient_id=? WHERE ingredient_id=?', [into, i.id]); run('UPDATE purchase SET ingredient_id=? WHERE ingredient_id=?', [into, i.id]); run('UPDATE OR IGNORE staple SET ingredient_id=? WHERE ingredient_id=?', [into, i.id]); run('DELETE FROM staple WHERE ingredient_id=?', [i.id]); run('UPDATE ingredient SET aliases=? WHERE id=?', [al, into]); run('DELETE FROM ingredient WHERE id=?', [i.id]); run('COMMIT');
       await persist(); state.ingEdit = null; toast('Merged into ' + target.name); ingredientsView();
     });
     const del = document.getElementById('e-del');
@@ -720,7 +723,7 @@ function dataView() {
     <div><h1>Data</h1><p class="muted" style="margin-top:8px;max-width:70ch">${MODE.kind === 'local'
       ? `Every change saves straight to your Mac, in <code>${esc(MODE.folder || 'Recipe Book/Data')}/recipes.db</code>. A copy goes into the <code>Backups</code> folder each day you use it, and the last 30 days are kept.`
       : 'Your recipes are saved in this browser on this device. Export the database to back it up or move it to another device. To use the copy on your Mac, start Recipe Book from its launcher and import the file there.'}</p></div>
-    <div class="card row" style="gap:28px"><span><b class="q">${n('recipe')}</b> recipes</span><span><b class="q">${n('ingredient')}</b> ingredients</span><span><b class="q">${n('step')}</b> steps</span><span><b class="q">${n('cook_log')}</b> cook log entries</span></div>
+    <div class="card row" style="gap:28px"><span><b class="q">${n('recipe')}</b> recipes</span><span><b class="q">${n('ingredient')}</b> ingredients</span><span><b class="q">${n('step')}</b> steps</span><span><b class="q">${n('cook_log')}</b> cook log entries</span><span><b class="q">${n('staple')}</b> staples</span><span><b class="q">${n('purchase')}</b> purchases</span></div>
     <div class="card stack" style="gap:10px"><h2>Export</h2><p class="muted">Downloads a copy of everything as a SQLite file.</p><div><button class="btn" id="exp" type="button">Export recipes.db</button></div></div>
     <div class="card stack" style="gap:10px"><h2>Import</h2><p class="muted">Replaces what is on this device with a database file you exported earlier.</p>
       <div class="row"><input type="file" id="imp" accept=".db,.sqlite,application/x-sqlite3,application/octet-stream" style="max-width:360px"><span class="err" id="imsg" role="alert"></span></div></div>
@@ -755,8 +758,11 @@ function route() {
   else if (h === 'new') { nav = 'new'; editView(null); }
   else if (h === 'ingredients') { nav = 'ingredients'; ingredientsView(); }
   else if (h === 'data') { nav = 'data'; dataView(); }
+  else if (h === 'shop') { nav = 'shop'; shopView(); }
+  else if (h === 'staples') { nav = 'shop'; staplesView(); }
   else { document.title = 'Recipe Book'; libraryView(); }
-  if (!h.startsWith('recipe-') && !h.startsWith('cook-')) document.title = { new: 'Add recipe', ingredients: 'Ingredients', data: 'Data' }[h] ? { new: 'Add recipe', ingredients: 'Ingredients', data: 'Data' }[h] + ' · Recipe Book' : document.title;
+  updateShopCount();
+  if (!h.startsWith('recipe-') && !h.startsWith('cook-') && h !== 'shop' && h !== 'staples') document.title = { new: 'Add recipe', ingredients: 'Ingredients', data: 'Data' }[h] ? { new: 'Add recipe', ingredients: 'Ingredients', data: 'Data' }[h] + ' · Recipe Book' : document.title;
   document.querySelectorAll('[data-nav]').forEach(a => { if (a.dataset.nav === nav) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   if (!h.startsWith('edit-') && h !== 'new') state.draft = state.draft && (h.startsWith('edit-') || h === 'new') ? state.draft : null;
   window.scrollTo(0, 0);

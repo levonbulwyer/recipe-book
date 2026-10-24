@@ -104,3 +104,25 @@ CREATE TABLE IF NOT EXISTS cook_log (
   rating     INTEGER CHECK (rating BETWEEN 1 AND 5),
   notes      TEXT
 );
+
+-- Shopping list. One row per thing to buy; the app adds rows from the same ingredient together.
+CREATE TABLE IF NOT EXISTS shop_item (
+  id            INTEGER PRIMARY KEY,
+  ingredient_id INTEGER REFERENCES ingredient(id) ON DELETE CASCADE,
+  name TEXT, aisle TEXT,                            -- only used if not on the master list
+  amount REAL, unit TEXT, noun TEXT,                -- from a recipe, already scaled
+  qty           TEXT,                               -- typed by hand, e.g. "1 kg"
+  reason        TEXT NOT NULL DEFAULT 'added' CHECK (reason IN ('added','ranout','staple','recipe')),
+  recipe_id     INTEGER REFERENCES recipe(id) ON DELETE CASCADE,
+  pantry        INTEGER NOT NULL DEFAULT 0,         -- "check you have" rather than "buy"
+  checked       INTEGER NOT NULL DEFAULT 0,
+  added_on      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS shop_recipe (recipe_id INTEGER PRIMARY KEY REFERENCES recipe(id) ON DELETE CASCADE, servings INTEGER NOT NULL);
+-- Things bought again and again. every_days NULL means: learn the gap from purchase history.
+CREATE TABLE IF NOT EXISTS staple (
+  ingredient_id INTEGER PRIMARY KEY REFERENCES ingredient(id) ON DELETE CASCADE,
+  every_days INTEGER, qty TEXT, last_added TEXT
+);
+-- Written by "Done shopping". Drives the staple timers.
+CREATE TABLE IF NOT EXISTS purchase (id INTEGER PRIMARY KEY, ingredient_id INTEGER REFERENCES ingredient(id) ON DELETE CASCADE, name TEXT, bought_on TEXT NOT NULL);
